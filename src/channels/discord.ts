@@ -1,4 +1,11 @@
-import { Client, Events, GatewayIntentBits, Message, TextChannel } from 'discord.js';
+import {
+  Client,
+  Events,
+  GatewayIntentBits,
+  Message,
+  Partials,
+  TextChannel,
+} from 'discord.js';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
@@ -15,6 +22,7 @@ export interface DiscordChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  onRegisterGroup?: (jid: string, group: RegisteredGroup) => void;
 }
 
 export class DiscordChannel implements Channel {
@@ -37,6 +45,7 @@ export class DiscordChannel implements Channel {
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.DirectMessages,
       ],
+      partials: [Partials.Channel],
     });
 
     this.client.on(Events.MessageCreate, async (message: Message) => {
@@ -67,6 +76,9 @@ export class DiscordChannel implements Channel {
       // Discord mentions look like <@botUserId> — these won't match
       // TRIGGER_PATTERN (e.g., ^@Andy\b), so we prepend the trigger
       // when the bot is @mentioned.
+      // Also detect role mentions (<@&roleId>) — Discord auto-creates a
+      // managed role for bots, and users often pick the role instead of
+      // the user from autocomplete.
       if (this.client?.user) {
         const botId = this.client.user.id;
         const isBotMentioned =
@@ -74,10 +86,21 @@ export class DiscordChannel implements Channel {
           content.includes(`<@${botId}>`) ||
           content.includes(`<@!${botId}>`);
 
-        if (isBotMentioned) {
-          // Strip the <@botId> mention to avoid visual clutter
+        // Check if the bot's managed role is mentioned
+        const botRoleIds = message.guild?.roles.cache
+          .filter((r) => r.managed && r.tags?.botId === botId)
+          .map((r) => r.id) || [];
+        const isRoleMentioned = botRoleIds.some(
+          (roleId) =>
+            message.mentions.roles.has(roleId) ||
+            content.includes(`<@&${roleId}>`),
+        );
+
+        if (isBotMentioned || isRoleMentioned) {
+          // Strip both user and role mentions to avoid visual clutter
           content = content
             .replace(new RegExp(`<@!?${botId}>`, 'g'), '')
+            .replace(new RegExp(botRoleIds.map((id) => `<@&${id}>`).join('|') || '$^', 'g'), '')
             .trim();
           // Prepend trigger if not already present
           if (!TRIGGER_PATTERN.test(content)) {
@@ -88,18 +111,20 @@ export class DiscordChannel implements Channel {
 
       // Handle attachments — store placeholders so the agent knows something was sent
       if (message.attachments.size > 0) {
-        const attachmentDescriptions = [...message.attachments.values()].map((att) => {
-          const contentType = att.contentType || '';
-          if (contentType.startsWith('image/')) {
-            return `[Image: ${att.name || 'image'}]`;
-          } else if (contentType.startsWith('video/')) {
-            return `[Video: ${att.name || 'video'}]`;
-          } else if (contentType.startsWith('audio/')) {
-            return `[Audio: ${att.name || 'audio'}]`;
-          } else {
-            return `[File: ${att.name || 'file'}]`;
-          }
-        });
+        const attachmentDescriptions = [...message.attachments.values()].map(
+          (att) => {
+            const contentType = att.contentType || '';
+            if (contentType.startsWith('image/')) {
+              return `[Image: ${att.name || 'image'}]`;
+            } else if (contentType.startsWith('video/')) {
+              return `[Video: ${att.name || 'video'}]`;
+            } else if (contentType.startsWith('audio/')) {
+              return `[Audio: ${att.name || 'audio'}]`;
+            } else {
+              return `[File: ${att.name || 'file'}]`;
+            }
+          },
+        );
         if (content) {
           content = `${content}\n${attachmentDescriptions.join('\n')}`;
         } else {
@@ -125,10 +150,32 @@ export class DiscordChannel implements Channel {
 
       // Store chat metadata for discovery
       const isGroup = message.guild !== null;
-      this.opts.onChatMetadata(chatJid, timestamp, chatName, 'discord', isGroup);
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        chatName,
+        'discord',
+        isGroup,
+      );
 
-      // Only deliver full message for registered groups
-      const group = this.opts.registeredGroups()[chatJid];
+      // Auto-register Discord channels when bot is @mentioned
+      let group = this.opts.registeredGroups()[chatJid];
+      if (!group && TRIGGER_PATTERN.test(content) && this.opts.onRegisterGroup) {
+        const folderName = `discord_${(message.channel as TextChannel).name || channelId}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const newGroup: RegisteredGroup = {
+          name: chatName,
+          folder: folderName,
+          trigger: `@${ASSISTANT_NAME}`,
+          added_at: new Date().toISOString(),
+          requiresTrigger: true,
+        };
+        this.opts.onRegisterGroup(chatJid, newGroup);
+        group = this.opts.registeredGroups()[chatJid];
+        logger.info(
+          { chatJid, chatName, folder: folderName },
+          'Auto-registered Discord channel',
+        );
+      }
       if (!group) {
         logger.debug(
           { chatJid, chatName },

@@ -1,11 +1,16 @@
 /**
  * Container runtime abstraction for NanoClaw.
  * All runtime-specific logic lives here so swapping runtimes means changing one file.
+ *
+ * Supports two modes:
+ *   - docker: Agents run inside Docker containers (default)
+ *   - local:  Agents run as direct Node.js processes on the host
  */
 import { execSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 
+import { AGENT_RUNTIME } from './config.js';
 import { logger } from './logger.js';
 
 /** The container runtime binary name. */
@@ -19,11 +24,13 @@ export const CONTAINER_HOST_GATEWAY = 'host.docker.internal';
  * Docker Desktop (macOS): 127.0.0.1 — the VM routes host.docker.internal to loopback.
  * Docker (Linux): bind to the docker0 bridge IP so only containers can reach it,
  *   falling back to 0.0.0.0 if the interface isn't found.
+ * Local mode: 127.0.0.1 — no proxy needed, but keep it valid.
  */
 export const PROXY_BIND_HOST =
   process.env.CREDENTIAL_PROXY_HOST || detectProxyBindHost();
 
 function detectProxyBindHost(): string {
+  if (AGENT_RUNTIME === 'local') return '127.0.0.1';
   if (os.platform() === 'darwin') return '127.0.0.1';
 
   // WSL uses Docker Desktop (same VM routing as macOS) — loopback is correct.
@@ -64,6 +71,11 @@ export function stopContainer(name: string): string {
 
 /** Ensure the container runtime is running, starting it if needed. */
 export function ensureContainerRuntimeRunning(): void {
+  if (AGENT_RUNTIME === 'local') {
+    logger.info('Local agent runtime — no container runtime needed');
+    return;
+  }
+
   try {
     execSync(`${CONTAINER_RUNTIME_BIN} info`, {
       stdio: 'pipe',
@@ -100,8 +112,13 @@ export function ensureContainerRuntimeRunning(): void {
   }
 }
 
-/** Kill orphaned NanoClaw containers from previous runs. */
+/** Kill orphaned NanoClaw containers/processes from previous runs. */
 export function cleanupOrphans(): void {
+  if (AGENT_RUNTIME === 'local') {
+    logger.debug('Local mode — skipping container orphan cleanup');
+    return;
+  }
+
   try {
     const output = execSync(
       `${CONTAINER_RUNTIME_BIN} ps --filter name=nanoclaw- --format '{{.Names}}'`,

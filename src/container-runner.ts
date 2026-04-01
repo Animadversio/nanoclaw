@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 
 import {
+  AGENT_RUNTIME,
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
@@ -16,6 +17,7 @@ import {
   IDLE_TIMEOUT,
   TIMEZONE,
 } from './config.js';
+import { readEnvFile } from './env.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import {
@@ -264,6 +266,74 @@ function buildContainerArgs(
   return args;
 }
 
+/**
+ * Prepare directories for local agent execution.
+ * Reuses buildVolumeMounts for directory setup (sessions, IPC, skills sync),
+ * then returns the env vars the agent-runner needs.
+ */
+function prepareLocalAgent(
+  group: RegisteredGroup,
+  isMain: boolean,
+): { env: Record<string, string>; agentRunnerPath: string } {
+  const projectRoot = process.cwd();
+  const groupDir = resolveGroupFolderPath(group.folder);
+  const groupIpcDir = resolveGroupIpcPath(group.folder);
+
+  // Reuse buildVolumeMounts for side effects (creates dirs, syncs skills, settings)
+  buildVolumeMounts(group, isMain);
+
+  // Read credentials directly from .env (no proxy needed in local mode)
+  const secrets = readEnvFile([
+    'ANTHROPIC_API_KEY',
+    'CLAUDE_CODE_OAUTH_TOKEN',
+    'ANTHROPIC_AUTH_TOKEN',
+    'ANTHROPIC_BASE_URL',
+  ]);
+
+  const groupSessionsDir = path.join(
+    DATA_DIR,
+    'sessions',
+    group.folder,
+    '.claude',
+  );
+
+  const globalDir = path.join(GROUPS_DIR, 'global');
+
+  const env: Record<string, string> = {
+    ...(process.env as Record<string, string>),
+    TZ: TIMEZONE,
+    HOME: path.dirname(groupSessionsDir), // so .claude/ is found at $HOME/.claude
+    NANOCLAW_GROUP_DIR: groupDir,
+    NANOCLAW_IPC_DIR: groupIpcDir,
+    NANOCLAW_GLOBAL_DIR: fs.existsSync(globalDir) ? globalDir : '',
+  };
+
+  // Pass credentials directly (no proxy in local mode)
+  if (secrets.ANTHROPIC_API_KEY) {
+    env.ANTHROPIC_API_KEY = secrets.ANTHROPIC_API_KEY;
+  }
+  if (secrets.CLAUDE_CODE_OAUTH_TOKEN) {
+    env.CLAUDE_CODE_OAUTH_TOKEN = secrets.CLAUDE_CODE_OAUTH_TOKEN;
+  }
+  if (secrets.ANTHROPIC_AUTH_TOKEN) {
+    env.ANTHROPIC_AUTH_TOKEN = secrets.ANTHROPIC_AUTH_TOKEN;
+  }
+  if (secrets.ANTHROPIC_BASE_URL) {
+    env.ANTHROPIC_BASE_URL = secrets.ANTHROPIC_BASE_URL;
+  }
+
+  // Agent-runner compiled output
+  const agentRunnerPath = path.join(
+    projectRoot,
+    'container',
+    'agent-runner',
+    'dist',
+    'index.js',
+  );
+
+  return { env, agentRunnerPath };
+}
+
 export async function runContainerAgent(
   group: RegisteredGroup,
   input: ContainerInput,
@@ -275,40 +345,67 @@ export async function runContainerAgent(
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(mounts, containerName);
-
-  logger.debug(
-    {
-      group: group.name,
-      containerName,
-      mounts: mounts.map(
-        (m) =>
-          `${m.hostPath} -> ${m.containerPath}${m.readonly ? ' (ro)' : ''}`,
-      ),
-      containerArgs: containerArgs.join(' '),
-    },
-    'Container mount configuration',
-  );
-
-  logger.info(
-    {
-      group: group.name,
-      containerName,
-      mountCount: mounts.length,
-      isMain: input.isMain,
-    },
-    'Spawning container agent',
-  );
 
   const logsDir = path.join(groupDir, 'logs');
   fs.mkdirSync(logsDir, { recursive: true });
 
+  let spawnBin: string;
+  let spawnArgs: string[];
+  let spawnEnv: Record<string, string> | undefined;
+  let containerArgs: string[] = [];
+  let mounts: VolumeMount[] = [];
+
+  if (AGENT_RUNTIME === 'local') {
+    const local = prepareLocalAgent(group, input.isMain);
+    spawnBin = process.execPath; // node binary
+    spawnArgs = [local.agentRunnerPath];
+    spawnEnv = local.env;
+
+    logger.info(
+      {
+        group: group.name,
+        containerName,
+        isMain: input.isMain,
+        runtime: 'local',
+      },
+      'Spawning local agent',
+    );
+  } else {
+    mounts = buildVolumeMounts(group, input.isMain);
+    containerArgs = buildContainerArgs(mounts, containerName);
+    spawnBin = CONTAINER_RUNTIME_BIN;
+    spawnArgs = containerArgs;
+
+    logger.debug(
+      {
+        group: group.name,
+        containerName,
+        mounts: mounts.map(
+          (m) =>
+            `${m.hostPath} -> ${m.containerPath}${m.readonly ? ' (ro)' : ''}`,
+        ),
+        containerArgs: containerArgs.join(' '),
+      },
+      'Container mount configuration',
+    );
+
+    logger.info(
+      {
+        group: group.name,
+        containerName,
+        mountCount: mounts.length,
+        isMain: input.isMain,
+      },
+      'Spawning container agent',
+    );
+  }
+
   return new Promise((resolve) => {
-    const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
+    const container = spawn(spawnBin, spawnArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
+      ...(spawnEnv ? { env: spawnEnv } : {}),
     });
 
     onProcess(container, containerName);
@@ -411,17 +508,24 @@ export async function runContainerAgent(
       timedOut = true;
       logger.error(
         { group: group.name, containerName },
-        'Container timeout, stopping gracefully',
+        'Agent timeout, stopping gracefully',
       );
-      exec(stopContainer(containerName), { timeout: 15000 }, (err) => {
-        if (err) {
-          logger.warn(
-            { group: group.name, containerName, err },
-            'Graceful stop failed, force killing',
-          );
-          container.kill('SIGKILL');
-        }
-      });
+      if (AGENT_RUNTIME === 'local') {
+        container.kill('SIGTERM');
+        setTimeout(() => {
+          if (!container.killed) container.kill('SIGKILL');
+        }, 5000);
+      } else {
+        exec(stopContainer(containerName), { timeout: 15000 }, (err) => {
+          if (err) {
+            logger.warn(
+              { group: group.name, containerName, err },
+              'Graceful stop failed, force killing',
+            );
+            container.kill('SIGKILL');
+          }
+        });
+      }
     };
 
     let timeout = setTimeout(killOnTimeout, timeoutMs);
