@@ -542,17 +542,16 @@ async function main(): Promise<void> {
     }
   }
 
-  // Handle /verbose, /verbose bash, /quiet commands.
-  // Writes a .verbose flag file to the group folder; agent-runner reads it at startup.
+  // Handle /verbose, /verbose bash, /verbose edit, /quiet commands.
+  // Writes a .verbose flag file to the group folder; agent-runner reads it per tool call.
+  // Returns the confirmation message string so callers can reply however they need.
   async function handleVerbosityCommand(
     command: string,
     chatJid: string,
-  ): Promise<void> {
+  ): Promise<string> {
     const group = registeredGroups[chatJid];
-    if (!group) return;
-
-    const channel = findChannel(channels, chatJid);
-    if (!channel) return;
+    if (!group)
+      return 'This channel is not registered yet — @mention me first.';
 
     const groupDir = resolveGroupFolderPath(group.folder);
     const flagPath = path.join(groupDir, '.verbose');
@@ -563,19 +562,21 @@ async function main(): Promise<void> {
       } catch {
         /* already gone */
       }
-      await channel.sendMessage(
-        chatJid,
-        "Verbose mode off. I'll only send the final result.",
-      );
-    } else {
-      const level = command === '/verbose bash' ? 'bash' : 'all';
-      fs.writeFileSync(flagPath, level);
-      const msg =
-        level === 'bash'
-          ? "Verbose (bash) mode on — I'll narrate bash commands during long tasks."
-          : "Verbose mode on — I'll narrate all tool calls during long tasks.";
-      await channel.sendMessage(chatJid, msg);
+      return "Verbose mode off. I'll only send the final result.";
     }
+
+    const level =
+      command === '/verbose bash'
+        ? 'bash'
+        : command === '/verbose edit'
+          ? 'edit'
+          : 'all';
+    fs.writeFileSync(flagPath, level);
+    return level === 'bash'
+      ? "Verbose (bash) mode on — I'll narrate bash commands during long tasks."
+      : level === 'edit'
+        ? "Verbose (edit) mode on — I'll narrate bash commands and file writes/edits."
+        : "Verbose mode on — I'll narrate all tool calls during long tasks.";
   }
 
   // Channel callbacks (shared by all channels)
@@ -593,17 +594,19 @@ async function main(): Promise<void> {
       // Verbosity commands — intercept before storage.
       // Accept both /verbose and !verbose prefixes: Discord intercepts '/'
       // as a slash command before it reaches the bot, so '!' is needed there.
-      const verboseCmd = trimmed
-        .replace(/^!/, '/')
-        .toLowerCase();
+      const verboseCmd = trimmed.replace(/^!/, '/').toLowerCase();
       if (
         verboseCmd === '/verbose' ||
         verboseCmd === '/verbose bash' ||
+        verboseCmd === '/verbose edit' ||
         verboseCmd === '/quiet'
       ) {
-        handleVerbosityCommand(verboseCmd, chatJid).catch((err) =>
-          logger.error({ err, chatJid }, 'Verbosity command error'),
-        );
+        const ch = findChannel(channels, chatJid);
+        handleVerbosityCommand(verboseCmd, chatJid)
+          .then((reply) => ch?.sendMessage(chatJid, reply))
+          .catch((err) =>
+            logger.error({ err, chatJid }, 'Verbosity command error'),
+          );
         return;
       }
 
@@ -634,6 +637,8 @@ async function main(): Promise<void> {
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
     registeredGroups: () => registeredGroups,
     onRegisterGroup: registerGroup,
+    onVerbosityCommand: (chatJid: string, command: string) =>
+      handleVerbosityCommand(command, chatJid),
   };
 
   // Create and connect all registered channels.
