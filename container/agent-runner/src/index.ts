@@ -341,8 +341,10 @@ function formatToolNotification(
 ): string | null {
   if (SKIP_VERBOSE_TOOLS.has(name) || name.startsWith('mcp__nanoclaw__')) return null;
   switch (name) {
-    case 'Bash':
-      return `🔧 \`${String(input.command || '').slice(0, 120)}\``;
+    case 'Bash': {
+      const cmd = String(input.command || '');
+      return `🔧 \`${cmd.length > 150 ? cmd.slice(0, 150) + '...' : cmd}\``;
+    }
     case 'Read':
       return `📖 Reading \`${input.file_path}\``;
     case 'Write':
