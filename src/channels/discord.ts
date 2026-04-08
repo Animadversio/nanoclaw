@@ -9,6 +9,9 @@ import {
   GatewayIntentBits,
   Message,
   Partials,
+  REST,
+  Routes,
+  SlashCommandBuilder,
   TextChannel,
 } from 'discord.js';
 
@@ -28,6 +31,7 @@ export interface DiscordChannelOpts {
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
   onRegisterGroup?: (jid: string, group: RegisteredGroup) => void;
+  onVerbosityCommand?: (chatJid: string, command: string) => Promise<string>;
 }
 
 export class DiscordChannel implements Channel {
@@ -258,13 +262,80 @@ export class DiscordChannel implements Channel {
       );
     });
 
+    // Handle /verbose slash command interactions
+    this.client.on(Events.InteractionCreate, async (interaction) => {
+      if (!interaction.isChatInputCommand()) return;
+      if (interaction.commandName !== 'verbose') return;
+
+      const chatJid = `dc:${interaction.channelId}`;
+      const level = interaction.options.getString('level') ?? 'all';
+      const command =
+        level === 'off'
+          ? '/quiet'
+          : level === 'all'
+            ? '/verbose'
+            : `/verbose ${level}`;
+
+      await interaction.deferReply();
+
+      let reply = 'Verbose mode updated.';
+      if (this.opts.onVerbosityCommand) {
+        try {
+          reply = await this.opts.onVerbosityCommand(chatJid, command);
+        } catch (err) {
+          reply = 'Failed to update verbose mode.';
+          logger.error({ chatJid, err }, 'Verbosity slash command error');
+        }
+      }
+      await interaction.editReply(reply);
+    });
+
     // Handle errors gracefully
     this.client.on(Events.Error, (err) => {
       logger.error({ err: err.message }, 'Discord client error');
     });
 
     return new Promise<void>((resolve) => {
-      this.client!.once(Events.ClientReady, (readyClient) => {
+      this.client!.once(Events.ClientReady, async (readyClient) => {
+        // Register /verbose slash command for all guilds
+        const verboseCommand = new SlashCommandBuilder()
+          .setName('verbose')
+          .setDescription('Control progress narration during long tasks')
+          .addStringOption((option) =>
+            option
+              .setName('level')
+              .setDescription('Verbosity level (default: all)')
+              .setRequired(false)
+              .addChoices(
+                { name: 'all — narrate all tool calls', value: 'all' },
+                {
+                  name: 'edit — bash + file writes/edits (no reads)',
+                  value: 'edit',
+                },
+                { name: 'bash — bash commands only', value: 'bash' },
+                { name: 'off — turn off verbose mode', value: 'off' },
+              ),
+          );
+
+        const rest = new REST().setToken(this.botToken);
+        for (const guild of readyClient.guilds.cache.values()) {
+          try {
+            await rest.put(
+              Routes.applicationGuildCommands(readyClient.user.id, guild.id),
+              { body: [verboseCommand.toJSON()] },
+            );
+            logger.debug(
+              { guild: guild.name },
+              'Discord slash commands registered',
+            );
+          } catch (err) {
+            logger.error(
+              { guild: guild.name, err },
+              'Failed to register Discord slash commands',
+            );
+          }
+        }
+
         logger.info(
           { username: readyClient.user.tag, id: readyClient.user.id },
           'Discord bot connected',

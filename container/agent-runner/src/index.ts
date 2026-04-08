@@ -431,6 +431,8 @@ async function runQuery(
   let verbosePromptAppend = '';
   if (verboseLevel === 'all') {
     verbosePromptAppend = '\n\n## Verbose Mode\nYou are in verbose mode. After each significant step (completing an analysis, finishing a file edit, getting important bash output), call mcp__nanoclaw__send_message with a brief human-readable progress update (1-2 sentences). Focus on meaningful milestones — not every individual file read.';
+  } else if (verboseLevel === 'edit') {
+    verbosePromptAppend = '\n\n## Verbose Mode (Edit)\nYou are in verbose mode. After each bash command or file write/edit, call mcp__nanoclaw__send_message with a brief summary of what you changed or found. Skip read-only operations.';
   } else if (verboseLevel === 'bash') {
     verbosePromptAppend = '\n\n## Verbose Mode (Bash)\nYou are in verbose mode. After each bash command that produces meaningful output, call mcp__nanoclaw__send_message with a brief summary of what you ran and what you found.';
   }
@@ -517,6 +519,11 @@ async function runQuery(
         for (const block of content as Array<{ type: string; name?: string; input?: Record<string, unknown> }>) {
           if (block.type !== 'tool_use' || !block.name) continue;
           if (currentVerboseLevel === 'bash' && block.name !== 'Bash') continue;
+          if (
+            currentVerboseLevel === 'edit' &&
+            !['Bash', 'Write', 'Edit', 'Task'].includes(block.name)
+          )
+            continue;
           const notification = formatToolNotification(block.name, block.input || {});
           if (notification) {
             writeOutput({ status: 'success', result: notification, newSessionId });
