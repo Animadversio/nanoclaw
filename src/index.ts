@@ -542,6 +542,34 @@ async function main(): Promise<void> {
     }
   }
 
+  // Handle /verbose, /verbose bash, /quiet commands.
+  // Writes a .verbose flag file to the group folder; agent-runner reads it at startup.
+  async function handleVerbosityCommand(
+    command: string,
+    chatJid: string,
+  ): Promise<void> {
+    const group = registeredGroups[chatJid];
+    if (!group) return;
+
+    const channel = findChannel(channels, chatJid);
+    if (!channel) return;
+
+    const groupDir = resolveGroupFolderPath(group.folder);
+    const flagPath = path.join(groupDir, '.verbose');
+
+    if (command === '/quiet') {
+      try { fs.unlinkSync(flagPath); } catch { /* already gone */ }
+      await channel.sendMessage(chatJid, 'Verbose mode off. I\'ll only send the final result.');
+    } else {
+      const level = command === '/verbose bash' ? 'bash' : 'all';
+      fs.writeFileSync(flagPath, level);
+      const msg = level === 'bash'
+        ? 'Verbose (bash) mode on — I\'ll narrate bash commands during long tasks.'
+        : 'Verbose mode on — I\'ll narrate all tool calls during long tasks.';
+      await channel.sendMessage(chatJid, msg);
+    }
+  }
+
   // Channel callbacks (shared by all channels)
   const channelOpts = {
     onMessage: (chatJid: string, msg: NewMessage) => {
@@ -550,6 +578,18 @@ async function main(): Promise<void> {
       if (trimmed === '/remote-control' || trimmed === '/remote-control-end') {
         handleRemoteControl(trimmed, chatJid, msg).catch((err) =>
           logger.error({ err, chatJid }, 'Remote control command error'),
+        );
+        return;
+      }
+
+      // Verbosity commands — intercept before storage
+      if (
+        trimmed === '/verbose' ||
+        trimmed === '/verbose bash' ||
+        trimmed === '/quiet'
+      ) {
+        handleVerbosityCommand(trimmed, chatJid).catch((err) =>
+          logger.error({ err, chatJid }, 'Verbosity command error'),
         );
         return;
       }
