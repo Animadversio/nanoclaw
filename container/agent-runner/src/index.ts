@@ -498,12 +498,16 @@ async function runQuery(
 
     // Verbose mode: emit a sentinel marker for each tool call so the host
     // can forward it to the channel without waiting for the final result.
-    if (verboseLevel && message.type === 'assistant') {
+    // Re-read the flag on each assistant message so changes mid-session take effect.
+    if (message.type === 'assistant') {
+      const currentVerboseLevel: string | null = fs.existsSync(verboseFlagPath)
+        ? (fs.readFileSync(verboseFlagPath, 'utf-8').trim() || 'all')
+        : null;
       const content = (message as { message?: { content?: unknown[] } }).message?.content;
-      if (Array.isArray(content)) {
+      if (currentVerboseLevel && Array.isArray(content)) {
         for (const block of content as Array<{ type: string; name?: string; input?: Record<string, unknown> }>) {
           if (block.type !== 'tool_use' || !block.name) continue;
-          if (verboseLevel === 'bash' && block.name !== 'Bash') continue;
+          if (currentVerboseLevel === 'bash' && block.name !== 'Bash') continue;
           const notification = formatToolNotification(block.name, block.input || {});
           if (notification) {
             writeOutput({ status: 'success', result: notification, newSessionId });
