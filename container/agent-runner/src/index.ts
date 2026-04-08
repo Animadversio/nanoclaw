@@ -325,6 +325,43 @@ function waitForIpcMessage(): Promise<string | null> {
   });
 }
 
+// Tools that should never emit verbose notifications (internal/housekeeping)
+const SKIP_VERBOSE_TOOLS = new Set([
+  'mcp__nanoclaw__send_message',
+  'mcp__nanoclaw__list_tasks',
+  'TodoWrite',
+  'NotebookEdit',
+]);
+
+function formatToolNotification(
+  name: string,
+  input: Record<string, unknown>,
+): string | null {
+  if (SKIP_VERBOSE_TOOLS.has(name) || name.startsWith('mcp__nanoclaw__')) return null;
+  switch (name) {
+    case 'Bash':
+      return `🔧 \`${String(input.command || '').slice(0, 120)}\``;
+    case 'Read':
+      return `📖 Reading \`${input.file_path}\``;
+    case 'Write':
+      return `📝 Writing \`${input.file_path}\``;
+    case 'Edit':
+      return `✏️ Editing \`${input.file_path}\``;
+    case 'Glob':
+      return `🔍 Glob \`${input.pattern}\``;
+    case 'Grep':
+      return `🔎 Searching \`${input.pattern}\``;
+    case 'WebSearch':
+      return `🌐 Searching: ${input.query}`;
+    case 'WebFetch':
+      return `🌐 Fetching: ${String(input.url || '').slice(0, 80)}`;
+    case 'Task':
+      return `🤖 Spawning subagent: ${String(input.description || '').slice(0, 80)}`;
+    default:
+      return `🔧 ${name}`;
+  }
+}
+
 /**
  * Run a single query and stream results via writeOutput.
  * Uses MessageStream (AsyncIterable) to keep isSingleUserTurn=false,
@@ -368,6 +405,14 @@ async function runQuery(
   let messageCount = 0;
   let resultCount = 0;
 
+  // Read verbose flag (re-read each query so changes between loops take effect)
+  const groupDir = process.env.NANOCLAW_GROUP_DIR || '/workspace/group';
+  const verboseFlagPath = path.join(groupDir, '.verbose');
+  const verboseLevel: string | null = fs.existsSync(verboseFlagPath)
+    ? (fs.readFileSync(verboseFlagPath, 'utf-8').trim() || 'all')
+    : null;
+  if (verboseLevel) log(`Verbose mode: ${verboseLevel}`);
+
   // Load global CLAUDE.md as additional system context (shared across all groups)
   const globalClaudeMdPath = process.env.NANOCLAW_GLOBAL_DIR
     ? path.join(process.env.NANOCLAW_GLOBAL_DIR, 'CLAUDE.md')
@@ -376,6 +421,16 @@ async function runQuery(
   if (!containerInput.isMain && fs.existsSync(globalClaudeMdPath)) {
     globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
   }
+
+  // Option C: append verbose instructions to system prompt so Claude also
+  // sends semantic progress updates via mcp__nanoclaw__send_message
+  let verbosePromptAppend = '';
+  if (verboseLevel === 'all') {
+    verbosePromptAppend = '\n\n## Verbose Mode\nYou are in verbose mode. After each significant step (completing an analysis, finishing a file edit, getting important bash output), call mcp__nanoclaw__send_message with a brief human-readable progress update (1-2 sentences). Focus on meaningful milestones — not every individual file read.';
+  } else if (verboseLevel === 'bash') {
+    verbosePromptAppend = '\n\n## Verbose Mode (Bash)\nYou are in verbose mode. After each bash command that produces meaningful output, call mcp__nanoclaw__send_message with a brief summary of what you ran and what you found.';
+  }
+  const systemPromptAppend = (globalClaudeMd || '') + verbosePromptAppend || undefined;
 
   // Discover additional directories mounted at /workspace/extra/*
   // These are passed to the SDK so their CLAUDE.md files are loaded automatically
@@ -400,8 +455,8 @@ async function runQuery(
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,
-      systemPrompt: globalClaudeMd
-        ? { type: 'preset' as const, preset: 'claude_code' as const, append: globalClaudeMd }
+      systemPrompt: systemPromptAppend
+        ? { type: 'preset' as const, preset: 'claude_code' as const, append: systemPromptAppend }
         : undefined,
       allowedTools: [
         'Bash',
@@ -439,6 +494,22 @@ async function runQuery(
 
     if (message.type === 'assistant' && 'uuid' in message) {
       lastAssistantUuid = (message as { uuid: string }).uuid;
+    }
+
+    // Verbose mode: emit a sentinel marker for each tool call so the host
+    // can forward it to the channel without waiting for the final result.
+    if (verboseLevel && message.type === 'assistant') {
+      const content = (message as { message?: { content?: unknown[] } }).message?.content;
+      if (Array.isArray(content)) {
+        for (const block of content as Array<{ type: string; name?: string; input?: Record<string, unknown> }>) {
+          if (block.type !== 'tool_use' || !block.name) continue;
+          if (verboseLevel === 'bash' && block.name !== 'Bash') continue;
+          const notification = formatToolNotification(block.name, block.input || {});
+          if (notification) {
+            writeOutput({ status: 'success', result: notification, newSessionId });
+          }
+        }
+      }
     }
 
     if (message.type === 'system' && message.subtype === 'init') {
