@@ -558,14 +558,22 @@ async function main(): Promise<void> {
     const flagPath = path.join(groupDir, '.verbose');
 
     if (command === '/quiet') {
-      try { fs.unlinkSync(flagPath); } catch { /* already gone */ }
-      await channel.sendMessage(chatJid, 'Verbose mode off. I\'ll only send the final result.');
+      try {
+        fs.unlinkSync(flagPath);
+      } catch {
+        /* already gone */
+      }
+      await channel.sendMessage(
+        chatJid,
+        "Verbose mode off. I'll only send the final result.",
+      );
     } else {
       const level = command === '/verbose bash' ? 'bash' : 'all';
       fs.writeFileSync(flagPath, level);
-      const msg = level === 'bash'
-        ? 'Verbose (bash) mode on — I\'ll narrate bash commands during long tasks.'
-        : 'Verbose mode on — I\'ll narrate all tool calls during long tasks.';
+      const msg =
+        level === 'bash'
+          ? "Verbose (bash) mode on — I'll narrate bash commands during long tasks."
+          : "Verbose mode on — I'll narrate all tool calls during long tasks.";
       await channel.sendMessage(chatJid, msg);
     }
   }
@@ -582,13 +590,18 @@ async function main(): Promise<void> {
         return;
       }
 
-      // Verbosity commands — intercept before storage
+      // Verbosity commands — intercept before storage.
+      // Accept both /verbose and !verbose prefixes: Discord intercepts '/'
+      // as a slash command before it reaches the bot, so '!' is needed there.
+      const verboseCmd = trimmed
+        .replace(/^!/, '/')
+        .toLowerCase();
       if (
-        trimmed === '/verbose' ||
-        trimmed === '/verbose bash' ||
-        trimmed === '/quiet'
+        verboseCmd === '/verbose' ||
+        verboseCmd === '/verbose bash' ||
+        verboseCmd === '/quiet'
       ) {
-        handleVerbosityCommand(trimmed, chatJid).catch((err) =>
+        handleVerbosityCommand(verboseCmd, chatJid).catch((err) =>
           logger.error({ err, chatJid }, 'Verbosity command error'),
         );
         return;
