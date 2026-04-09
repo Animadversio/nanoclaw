@@ -75,7 +75,11 @@ export function startIpcWatcher(deps: IpcDeps): void {
             const filePath = path.join(messagesDir, file);
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              if (data.type === 'message' && data.chatJid && (data.text || data.file_path)) {
+              if (
+                data.type === 'message' &&
+                data.chatJid &&
+                (data.text || data.file_path)
+              ) {
                 // Authorization: verify this group can send to this chatJid
                 const targetGroup = registeredGroups[data.chatJid];
                 if (
@@ -83,7 +87,11 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   (targetGroup && targetGroup.folder === sourceGroup)
                 ) {
                   if (data.file_path && deps.sendFile) {
-                    await deps.sendFile(data.chatJid, data.file_path, data.text);
+                    await deps.sendFile(
+                      data.chatJid,
+                      data.file_path,
+                      data.text,
+                    );
                   } else if (data.text) {
                     await deps.sendMessage(data.chatJid, data.text);
                   }
