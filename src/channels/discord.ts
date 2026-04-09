@@ -1,4 +1,9 @@
+import fs from 'fs';
+
+import path from 'path';
+
 import {
+  AttachmentBuilder,
   Client,
   Events,
   GatewayIntentBits,
@@ -7,7 +12,7 @@ import {
   TextChannel,
 } from 'discord.js';
 
-import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
+import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
@@ -87,9 +92,10 @@ export class DiscordChannel implements Channel {
           content.includes(`<@!${botId}>`);
 
         // Check if the bot's managed role is mentioned
-        const botRoleIds = message.guild?.roles.cache
-          .filter((r) => r.managed && r.tags?.botId === botId)
-          .map((r) => r.id) || [];
+        const botRoleIds =
+          message.guild?.roles.cache
+            .filter((r) => r.managed && r.tags?.botId === botId)
+            .map((r) => r.id) || [];
         const isRoleMentioned = botRoleIds.some(
           (roleId) =>
             message.mentions.roles.has(roleId) ||
@@ -100,7 +106,13 @@ export class DiscordChannel implements Channel {
           // Strip both user and role mentions to avoid visual clutter
           content = content
             .replace(new RegExp(`<@!?${botId}>`, 'g'), '')
-            .replace(new RegExp(botRoleIds.map((id) => `<@&${id}>`).join('|') || '$^', 'g'), '')
+            .replace(
+              new RegExp(
+                botRoleIds.map((id) => `<@&${id}>`).join('|') || '$^',
+                'g',
+              ),
+              '',
+            )
             .trim();
           // Prepend trigger if not already present
           if (!TRIGGER_PATTERN.test(content)) {
@@ -109,21 +121,58 @@ export class DiscordChannel implements Channel {
         }
       }
 
-      // Handle attachments — store placeholders so the agent knows something was sent
+      // Handle attachments — download text/JSON files, placeholder for others
       if (message.attachments.size > 0) {
-        const attachmentDescriptions = [...message.attachments.values()].map(
-          (att) => {
+        const attachmentDescriptions = await Promise.all(
+          [...message.attachments.values()].map(async (att) => {
             const contentType = att.contentType || '';
+            const name = att.name || 'file';
             if (contentType.startsWith('image/')) {
-              return `[Image: ${att.name || 'image'}]`;
+              return `[Image: ${name}]`;
             } else if (contentType.startsWith('video/')) {
-              return `[Video: ${att.name || 'video'}]`;
+              return `[Video: ${name}]`;
             } else if (contentType.startsWith('audio/')) {
-              return `[Audio: ${att.name || 'audio'}]`;
+              return `[Audio: ${name}]`;
+            } else if (
+              contentType.startsWith('text/') ||
+              contentType.includes('json') ||
+              name.endsWith('.json') ||
+              name.endsWith('.txt') ||
+              name.endsWith('.md') ||
+              name.endsWith('.yaml') ||
+              name.endsWith('.yml')
+            ) {
+              try {
+                const resp = await fetch(att.url);
+                const text = await resp.text();
+                return `[File: ${name}]\n\`\`\`\n${text}\n\`\`\``;
+              } catch {
+                return `[File: ${name}]`;
+              }
+            } else if (
+              name.endsWith('.epub') ||
+              name.endsWith('.pdf') ||
+              name.endsWith('.docx') ||
+              name.endsWith('.mobi')
+            ) {
+              // Download document to group's downloads folder for agent access
+              try {
+                const group = this.opts.registeredGroups()[chatJid];
+                const folder = group?.folder || `discord_${channelId}`;
+                const downloadsDir = path.join(GROUPS_DIR, folder, 'downloads');
+                fs.mkdirSync(downloadsDir, { recursive: true });
+                const localPath = path.join(downloadsDir, name);
+                const resp = await fetch(att.url);
+                const buf = Buffer.from(await resp.arrayBuffer());
+                fs.writeFileSync(localPath, buf);
+                return `[File: ${name}] (saved to ${localPath})`;
+              } catch {
+                return `[File: ${name}]`;
+              }
             } else {
-              return `[File: ${att.name || 'file'}]`;
+              return `[File: ${name}]`;
             }
-          },
+          }),
         );
         if (content) {
           content = `${content}\n${attachmentDescriptions.join('\n')}`;
@@ -160,8 +209,16 @@ export class DiscordChannel implements Channel {
 
       // Auto-register Discord channels when bot is @mentioned
       let group = this.opts.registeredGroups()[chatJid];
-      if (!group && TRIGGER_PATTERN.test(content) && this.opts.onRegisterGroup) {
-        const folderName = `discord_${(message.channel as TextChannel).name || channelId}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+      if (
+        !group &&
+        TRIGGER_PATTERN.test(content) &&
+        this.opts.onRegisterGroup
+      ) {
+        const folderName =
+          `discord_${(message.channel as TextChannel).name || channelId}`.replace(
+            /[^a-zA-Z0-9_-]/g,
+            '_',
+          );
         const newGroup: RegisteredGroup = {
           name: chatName,
           folder: folderName,
@@ -252,6 +309,37 @@ export class DiscordChannel implements Channel {
       logger.info({ jid, length: text.length }, 'Discord message sent');
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Discord message');
+    }
+  }
+
+  async sendFile(jid: string, filePath: string, caption?: string): Promise<void> {
+    if (!this.client) {
+      logger.warn('Discord client not initialized');
+      return;
+    }
+
+    try {
+      if (!fs.existsSync(filePath)) {
+        logger.error({ jid, filePath }, 'File not found for Discord upload');
+        return;
+      }
+
+      const channelId = jid.replace(/^dc:/, '');
+      const channel = await this.client.channels.fetch(channelId);
+
+      if (!channel || !('send' in channel)) {
+        logger.warn({ jid }, 'Discord channel not found or not text-based');
+        return;
+      }
+
+      const attachment = new AttachmentBuilder(filePath);
+      await (channel as TextChannel).send({
+        content: caption,
+        files: [attachment],
+      });
+      logger.info({ jid, filePath }, 'Discord file sent');
+    } catch (err) {
+      logger.error({ jid, filePath, err }, 'Failed to send Discord file');
     }
   }
 
