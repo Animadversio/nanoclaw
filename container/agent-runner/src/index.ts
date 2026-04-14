@@ -333,6 +333,37 @@ const SKIP_VERBOSE_TOOLS = new Set([
   'NotebookEdit',
 ]);
 
+// Patterns that identify secrets in command strings. Each entry is
+// [regex, replacement]. Applied in order — most specific first.
+const SECRET_PATTERNS: [RegExp, string][] = [
+  // Known key prefixes (Anthropic, OpenAI, GitHub tokens)
+  [/\bsk-ant-[A-Za-z0-9\-]{8,}/g, 'sk-ant-***'],
+  [/\bsk-[A-Za-z0-9]{20,}/g, 'sk-***'],
+  [/\bghp_[A-Za-z0-9]{10,}/g, 'ghp_***'],
+  [/\bgho_[A-Za-z0-9]{10,}/g, 'gho_***'],
+  [/\bgithub_pat_[A-Za-z0-9_]{10,}/g, 'github_pat_***'],
+  // HTTP auth headers: Bearer/Basic/Token <credential>
+  [/(Bearer|Basic|Token)\s+[A-Za-z0-9\-._~+/=]{8,}/g, '$1 ***'],
+  // Flag-style: --api-key, --token, --password, --secret, --credential (= or space separator)
+  [/(--(?:api[_-]?key|token|password|secret|credential|auth)[\s=])[^\s'";&|]+/gi, '$1***'],
+  // Env var assignments: ANYTHING containing KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH|OAUTH
+  [/\b([A-Z_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH|OAUTH|PRIVATE_KEY)[A-Z_]*=)[^\s'";&|]+/g, '$1***'],
+  // URL query params with secret-like names: ?api_key=xxx or &token=xxx
+  [/([?&](?:api[_-]?key|token|secret|password|credential|auth)=)[^&\s'"]+/gi, '$1***'],
+];
+
+function redactSecrets(text: string): string {
+  let result = text;
+  for (const [pattern, replacement] of SECRET_PATTERNS) {
+    result = result.replace(pattern, replacement);
+  }
+  return result;
+}
+
+function truncate(text: string, limit = 150): string {
+  return text.length > limit ? text.slice(0, limit) + '...' : text;
+}
+
 function formatToolNotification(
   name: string,
   input: Record<string, unknown>,
@@ -340,8 +371,9 @@ function formatToolNotification(
   if (SKIP_VERBOSE_TOOLS.has(name) || name.startsWith('mcp__nanoclaw__')) return null;
   switch (name) {
     case 'Bash': {
-      const cmd = String(input.command || '');
-      return `🔧 \`${cmd.length > 150 ? cmd.slice(0, 150) + '...' : cmd}\``;
+      // Redact secrets first, then truncate — limit is on the safe string
+      const cmd = truncate(redactSecrets(String(input.command || '')));
+      return `🔧 \`${cmd}\``;
     }
     case 'Read':
       return `📖 Reading \`${input.file_path}\``;
@@ -356,9 +388,10 @@ function formatToolNotification(
     case 'WebSearch':
       return `🌐 Searching: ${input.query}`;
     case 'WebFetch':
-      return `🌐 Fetching: ${String(input.url || '').slice(0, 80)}`;
+      // Redact any API keys in URLs (query params) before showing
+      return `🌐 Fetching: ${truncate(redactSecrets(String(input.url || '')), 100)}`;
     case 'Task':
-      return `🤖 Spawning subagent: ${String(input.description || '').slice(0, 80)}`;
+      return `🤖 Spawning subagent: ${truncate(String(input.description || ''), 100)}`;
     default:
       return `🔧 ${name}`;
   }

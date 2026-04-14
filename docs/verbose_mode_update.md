@@ -44,6 +44,7 @@ The setting is **per-channel** and **persists across restarts**. It is stored as
 564cfd5  fix: re-read verbose flag on each tool call to handle mid-session activation
 2fbf6ff  fix: truncate bash verbose notification at 150 chars with ellipsis
 179a64f  feat: /verbose Discord slash command with all/edit/bash/off levels
+<latest>  fix: redact secrets in verbose notifications before truncation
 ```
 
 ---
@@ -89,6 +90,24 @@ systemctl --user restart nanoclaw
 ### Step 5 — Test
 
 In any registered channel, send `!verbose` (or `/verbose` on Discord). You should get a confirmation reply. Then give the agent a task involving file edits or bash commands and watch for tool notifications.
+
+---
+
+## Secret Redaction
+
+Verbose notifications strip secrets from Bash commands and WebFetch URLs **before** truncating, so the 150-char limit applies to the already-safe string. Redacted patterns:
+
+| Pattern | Example input | Shown as |
+|---------|--------------|----------|
+| Anthropic key | `sk-ant-api03-abc...` | `sk-ant-***` |
+| OpenAI key | `sk-proj-abc123...` | `sk-***` |
+| GitHub tokens | `ghp_abc...`, `gho_abc...`, `github_pat_...` | `ghp_***` etc. |
+| HTTP auth headers | `Bearer eyJhbGc...` | `Bearer ***` |
+| Flag args | `--token abc123`, `--api-key=xyz` | `--token ***` |
+| Env var assignments | `ANTHROPIC_API_KEY=sk-...`, `MY_TOKEN=abc` | `ANTHROPIC_API_KEY=***` |
+| URL query params | `?api_key=abc&token=xyz` | `?api_key=***&token=***` |
+
+If a secret slips through (unusual format), open an issue or add a pattern to `SECRET_PATTERNS` in `container/agent-runner/src/index.ts`.
 
 ---
 
