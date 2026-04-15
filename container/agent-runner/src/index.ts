@@ -342,12 +342,14 @@ const SECRET_PATTERNS: [RegExp, string][] = [
   [/\bghp_[A-Za-z0-9]{10,}/g, 'ghp_***'],
   [/\bgho_[A-Za-z0-9]{10,}/g, 'gho_***'],
   [/\bgithub_pat_[A-Za-z0-9_]{10,}/g, 'github_pat_***'],
+  // Discord bot tokens: base64url(userId).base64url(ts).base64url(hmac)
+  [/[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}/g, '***'],
   // HTTP auth headers: Bearer/Basic/Token <credential>
   [/(Bearer|Basic|Token)\s+[A-Za-z0-9\-._~+/=]{8,}/g, '$1 ***'],
   // Flag-style: --api-key, --token, --password, --secret, --credential (= or space separator)
-  [/(--(?:api[_-]?key|token|password|secret|credential|auth)[\s=])[^\s'";&|]+/gi, '$1***'],
-  // Env var assignments: ANYTHING containing KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH|OAUTH
-  [/\b([A-Z_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH|OAUTH|PRIVATE_KEY)[A-Z_]*=)[^\s'";&|]+/g, '$1***'],
+  [/(--(?:api[_-]?key|token|password|secret|credential|auth)[\s=])(?:"[^"]*"|'[^']*'|[^\s'";&|]+)/gi, '$1***'],
+  // Env var assignments (quoted or unquoted): TOKEN="x" TOKEN='x' TOKEN=x
+  [/\b([A-Z_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH|OAUTH|PRIVATE_KEY)[A-Z_]*=)(?:"[^"]*"|'[^']*'|[^\s'";&|]+)/g, '$1***'],
   // URL query params with secret-like names: ?api_key=xxx or &token=xxx
   [/([?&](?:api[_-]?key|token|secret|password|credential|auth)=)[^&\s'"]+/gi, '$1***'],
 ];
