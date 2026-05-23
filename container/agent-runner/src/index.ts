@@ -335,6 +335,15 @@ const SKIP_VERBOSE_TOOLS = new Set([
   'NotebookEdit',
 ]);
 
+// Sanitize secrets from verbose notifications before truncation.
+// Matches VAR_NAME=value patterns where VAR_NAME contains KEY, TOKEN, SECRET, or PASSWORD.
+const SECRET_ASSIGN_RE =
+  /\b([A-Z_]*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIALS)[A-Z_]*)=(["']?)(\S+)\2/gi;
+
+function sanitizeSecrets(text: string): string {
+  return text.replace(SECRET_ASSIGN_RE, (_match, name, _quote) => `${name}=***`);
+}
+
 function formatToolNotification(
   name: string,
   input: Record<string, unknown>,
@@ -342,7 +351,7 @@ function formatToolNotification(
   if (SKIP_VERBOSE_TOOLS.has(name) || name.startsWith('mcp__nanoclaw__')) return null;
   switch (name) {
     case 'Bash': {
-      const cmd = String(input.command || '');
+      const cmd = sanitizeSecrets(String(input.command || ''));
       return `🔧 \`${cmd.length > 150 ? cmd.slice(0, 150) + '...' : cmd}\``;
     }
     case 'Read':

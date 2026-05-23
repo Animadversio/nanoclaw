@@ -70,6 +70,11 @@ function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+export function getTriggerPattern(name?: string): RegExp {
+  const n = name || ASSISTANT_NAME;
+  return new RegExp(`^${escapeRegex(n)}\\b`, 'i');
+}
+
 export const TRIGGER_PATTERN = new RegExp(
   `^@${escapeRegex(ASSISTANT_NAME)}\\b`,
   'i',
