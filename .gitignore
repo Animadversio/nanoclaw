@@ -36,3 +36,10 @@ groups/global/*
 .nanoclaw/
 
 agents-sdk-docs
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Large binaries (download separately)
+tools/cloudflared

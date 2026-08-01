@@ -1,0 +1,3 @@
+[submodule "tools/nanoclaw-cost-tracker"]
+	path = tools/nanoclaw-cost-tracker
+	url = https://github.com/Animadversio/nanoclaw-cost-tracker.git
